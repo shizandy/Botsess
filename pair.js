@@ -4,14 +4,12 @@ const { exec } = require("child_process");
 let router = express.Router();
 const pino = require("pino");
 const {
-    default: makeWASocket,
+    makeWASocket,
     useMultiFileAuthState,
     delay,
-    makeCacheableSignalKeyStore,
-    Browsers,
-    jidNormalizedUser,
-    fetchLatestBaileysVersion
-} = require("@whiskeysockets/baileys");
+    jidDecode,
+    fetchLatestWaWebVersion
+} = require("@neoxr/wb");
 const { upload } = require('./mega');
 
 function removeFile(FilePath) {
@@ -29,27 +27,44 @@ router.get('/', async (req, res) => {
         
         const { state, saveCreds } = await useMultiFileAuthState(`./session`);
         try {
-            // Get the latest version for better compatibility
-            const { version, isLatest } = await fetchLatestBaileysVersion();
-            console.log(`Using WA v${version.join('.')}, isLatest: ${isLatest}`);
+            // Get the latest version
+            const { version } = await fetchLatestWaWebVersion();
+            console.log(`Using WA v${version.join('.')}`);
             
             // Create a minimal logger
-            const logger = pino({ level: "fatal" }).child({ level: "fatal" });
+            const logger = pino({ level: "silent" });
             
             let PrabathPairWeb = makeWASocket({
-                version,
-                auth: {
-                    creds: state.creds,
-                    keys: makeCacheableSignalKeyStore(state.keys, logger),
-                },
-                printQRInTerminal: false,
+                auth: state,
+                browser: ['Chrome (Linux)', '', ''],
                 logger: logger,
-                browser: Browsers.macOS("Safari"),
-                connectTimeoutMs: 60000,
-                retryRequestDelayMs: 2500
+                version: version,
+                printQRInTerminal: false,
+                patchMessageBeforeSending: (message) => {
+                    const requiresPatch = !!(
+                        message.buttonsMessage ||
+                        message.templateMessage ||
+                        message.listMessage
+                    );
+                    if (requiresPatch) {
+                        message = {
+                            viewOnceMessage: {
+                                message: {
+                                    messageContextInfo: {
+                                        deviceListMetadataVersion: 2,
+                                        deviceListMetadata: {},
+                                    },
+                                    ...message,
+                                },
+                            },
+                        };
+                    }
+                    return message;
+                }
             });
 
             // Handle pairing code request
+            // Check if not registered - neoxr implementation
             if (!PrabathPairWeb.authState.creds.registered) {
                 await delay(1500);
                 
@@ -57,8 +72,7 @@ router.get('/', async (req, res) => {
                 num = num.replace(/[^0-9]/g, '');
                 
                 try {
-                    // In newer Baileys versions, the pairing code requires a properly formatted number
-                    // Ensuring it starts with country code, e.g., "1XXXXXXXXXX" for US
+                    // Request pairing code with @neoxr/wb
                     const code = await PrabathPairWeb.requestPairingCode(num);
                     console.log(`Generated pairing code: ${code} for number: ${num}`);
                     
@@ -88,7 +102,8 @@ router.get('/', async (req, res) => {
                         // Check if creds.json exists before proceeding
                         if (fs.existsSync('./session/creds.json')) {
                             const auth_path = './session/';
-                            const user_jid = jidNormalizedUser(PrabathPairWeb.user.id);
+                            // Get user JID in neoxr/wb format
+                            const user_jid = PrabathPairWeb.decodeJid(PrabathPairWeb.user.id);
 
                             function randomMegaId(length = 6, numberLength = 4) {
                                 const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
@@ -123,8 +138,8 @@ router.get('/', async (req, res) => {
                     process.exit(0);
                 } else if (connection === "close") {
                     // Handle reconnection with more robust error checking
-                    const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== 401 &&
-                                           lastDisconnect?.error?.output?.statusCode !== 410;
+                    let statusCode = lastDisconnect?.error?.output?.statusCode;
+                    const shouldReconnect = statusCode !== 401 && statusCode !== 410;
                     
                     if (shouldReconnect) {
                         await delay(10000);
